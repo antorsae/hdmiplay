@@ -45,6 +45,7 @@ Modified by Amanogawa Audio Lab
 
 #include "bcm_host.h"
 #include "ilclient.h"
+#include "interface/vmcs_host/vc_hdmi.h"
 
 #define OUT_CHANNELS(num_channels) ((num_channels) > 4 ? 8: (num_channels) > 2 ? 4: (num_channels))
 
@@ -58,6 +59,7 @@ Modified by Amanogawa Audio Lab
 #define IN_EN 1
 #define SLEEPTIME 50000
 
+typedef enum { false, true } bool;
 typedef int int32_t;
 
 typedef struct {
@@ -75,6 +77,17 @@ volatile int gbuf_st[BN]={};
 pthread_mutex_t mutex[BN];  // Mutex
 int _bytes_per_sample;
 
+static void SetAudioProps(bool stream_channels, uint32_t channel_map)
+{
+  char command[80], response[80];
+
+  sprintf(command, "hdmi_stream_channels %d", stream_channels ? 1 : 0);
+  vc_gencmd(response, sizeof response, command);
+
+  sprintf(command, "hdmi_channel_map 0x%08x", channel_map);
+  vc_gencmd(response, sizeof response, command);
+
+}
 
 
 static void input_buffer_callback(void *data, COMPONENT_T *comp)
@@ -354,7 +367,7 @@ uint32_t audioplay_get_latency(AUDIOPLAY_STATE_T *st)
 #define MIN_LATENCY_TIME 20
 
 static const char *audio_dest[] = {"local", "hdmi"};
-void play_api_test(int samplerate, int bitdepth, int nchannels, int dest)
+void play_api_test(int samplerate, int bitdepth, int nchannels, int dest, uint32_t channel_map)
 {
   AUDIOPLAY_STATE_T *st;
   int32_t ret;
@@ -366,22 +379,19 @@ void play_api_test(int samplerate, int bitdepth, int nchannels, int dest)
   ret = audioplay_create(&st, samplerate, nchannels, bitdepth, 10, buffer_size);
   assert(ret == 0);
 
+  SetAudioProps(0, channel_map);
+
   ret = audioplay_set_dest(st, audio_dest[dest]);
   assert(ret == 0);
   // iterate for 5 seconds worth of packets
-  printf("Into while\n");
   while(1)
   {
     uint8_t *buf;
     uint32_t latency;
 
-    printf("Into while2\n");
-
     while((buf = audioplay_get_buffer(st)) == NULL)
       usleep(10*1000);
     p=(uint8_t *)buf;
-
-    printf("before mutex lock\n");
 
     pthread_mutex_lock( &mutex[bn] );
     // fill the buffer FROM gbuf[bn]
@@ -400,7 +410,6 @@ void play_api_test(int samplerate, int bitdepth, int nchannels, int dest)
     while((latency = audioplay_get_latency(st)) > (samplerate * (MIN_LATENCY_TIME + CTTW_SLEEP_TIME) / 1000))
       usleep(CTTW_SLEEP_TIME*1000);
 
-    printf("before audioplay_play_buffer\n");
     ret = audioplay_play_buffer(st, buf, buffer_size);
     gbuf_st[bn]=IN_EN;
     pthread_mutex_unlock( &mutex[bn] );
@@ -443,10 +452,13 @@ void* in_thread(void)
 void printhelp(void)
 {
   char s[]="\n"
-    "This program receive 8ch 32bit data from stdin and output to HDMI\n"
+    "This program receives 8ch data from stdin and output to HDMI\n"
     "(Raspberry Pi)  "
     "Using OpenMAX IL, not ALSA\n\n"
-    "Usage: hdmi_play2.bin rate bitdepth\n\n"
+    "Usage: hdmiplay.bin rate bitdepth [mapping]\n\n"
+    "        rate in hz"
+    "        bitdepht 16 24 32"
+    "        mapping 01234567"
     "Example: sox test.wav -t .s16 - | brutefir 3way.conf | hdmi_play2.bin 44100 24\n\n";
 
   printf("%s",s);
@@ -463,7 +475,7 @@ int main (int argc, char **argv)
 
   bcm_host_init();
 
-  if (argc != 3){ 
+  if (argc < 3){ 
     printhelp();
     return 0;
   }
@@ -471,7 +483,20 @@ int main (int argc, char **argv)
   samplerate = atoi(argv[1]); 
   bitdepth=atoi(argv[2]);
   _bytes_per_sample = bitdepth >> 3;
-
+  int i;
+  uint32_t channel_map = 0xfac688; // 111 110 101 100 011 010 001 000
+  if (argc == 4) {
+    int map_len = strlen(argv[3]);
+    channel_map = 0;
+    for (i=0; i < map_len; i++) {
+      char c = argv[3][map_len-1-i];
+      channel_map <<= 3;
+      channel_map |= (c - '0') & 0x7;  
+      
+    }
+  }
+  channel_map |= 0x13000000;
+  printf("channel_map: %08x\n", channel_map);
   //sleep (1); //if nessesary
 
   //in_thread
@@ -484,7 +509,7 @@ int main (int argc, char **argv)
 
   // main loop
 
-  play_api_test(samplerate, bitdepth, channels, audio_dest);
+  play_api_test(samplerate, bitdepth, channels, audio_dest, channel_map);
 
 
   return 0;

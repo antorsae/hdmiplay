@@ -1,6 +1,5 @@
-OBJS=hdmi_play2.o
-BIN=hdmi_play2.bin
+OBJS=hdmiplay.o
+BIN=hdmiplay.bin
 LDFLAGS+=-lilclient
 
 include ./Makefile.include
-
