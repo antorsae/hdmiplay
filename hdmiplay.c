@@ -72,10 +72,11 @@ typedef struct {
   uint32_t bytes_per_sample;
 } AUDIOPLAY_STATE_T;
 
-uint8_t gbuf[BN][BUFFER_SIZE_SAMPLES * 8 * 4]={};
+uint8_t gbuf[BN][BUFFER_SIZE_SAMPLES * 8 * 4]={}; // worst case scenario: 8 input channels, 32 bit depth
 volatile int gbuf_st[BN]={};
 pthread_mutex_t mutex[BN];  // Mutex
 int _bytes_per_sample;
+int _in_channels = 0;
 
 static void SetAudioProps(bool stream_channels, uint32_t channel_map)
 {
@@ -187,8 +188,8 @@ int32_t audioplay_create(AUDIOPLAY_STATE_T **handle,
          case 8:
             pcm.eChannelMapping[0] = OMX_AUDIO_ChannelLF;
             pcm.eChannelMapping[1] = OMX_AUDIO_ChannelRF;
-            pcm.eChannelMapping[3] = OMX_AUDIO_ChannelCF;
-            pcm.eChannelMapping[2] = OMX_AUDIO_ChannelLFE;
+            pcm.eChannelMapping[2] = OMX_AUDIO_ChannelCF;
+            pcm.eChannelMapping[3] = OMX_AUDIO_ChannelLFE;
             pcm.eChannelMapping[4] = OMX_AUDIO_ChannelLR;
             pcm.eChannelMapping[5] = OMX_AUDIO_ChannelRR;
             pcm.eChannelMapping[6] = OMX_AUDIO_ChannelLS;
@@ -367,16 +368,15 @@ uint32_t audioplay_get_latency(AUDIOPLAY_STATE_T *st)
 #define MIN_LATENCY_TIME 20
 
 static const char *audio_dest[] = {"local", "hdmi"};
-void play_api_test(int samplerate, int bitdepth, int nchannels, int dest, uint32_t channel_map)
+void play_api_test(int samplerate, int bitdepth, int in_channels, int out_channels, int dest, uint32_t channel_map)
 {
   AUDIOPLAY_STATE_T *st;
   int32_t ret;
-  int buffer_size = (BUFFER_SIZE_SAMPLES * bitdepth * OUT_CHANNELS(nchannels))>>3;
+  int out_buffer_size = (BUFFER_SIZE_SAMPLES * _bytes_per_sample * OUT_CHANNELS(out_channels));
   int bn=0;
-  uint8_t *p;
   assert(dest == 0 || dest == 1);
 
-  ret = audioplay_create(&st, samplerate, nchannels, bitdepth, 10, buffer_size);
+  ret = audioplay_create(&st, samplerate, out_channels, bitdepth, 10, out_buffer_size);
   assert(ret == 0);
 
   SetAudioProps(0, channel_map);
@@ -391,13 +391,30 @@ void play_api_test(int samplerate, int bitdepth, int nchannels, int dest, uint32
 
     while((buf = audioplay_get_buffer(st)) == NULL)
       usleep(10*1000);
-    p=(uint8_t *)buf;
+    uint8_t * outbuf = (uint8_t *) buf;
+    uint8_t * inbuf  = (uint8_t *) gbuf[bn];
 
     pthread_mutex_lock( &mutex[bn] );
     // fill the buffer FROM gbuf[bn]
     if (gbuf_st[bn] != OUT_EN)
       return;
-    memcpy (buf,gbuf[bn],buffer_size);
+
+    if (in_channels == out_channels) {
+      memcpy (outbuf, inbuf, out_buffer_size);
+    } else {
+    // 1 2 3 4 5 6 
+    // 1 2 3 _ 4 5 6 _ 
+      int i;
+      for (i = 0; i < BUFFER_SIZE_SAMPLES; i++) {
+        memcpy(outbuf                       , inbuf                         , _bytes_per_sample * 3);
+        memset(outbuf + _bytes_per_sample*3, 0, _bytes_per_sample);
+        memcpy(outbuf + _bytes_per_sample*4 , inbuf + _bytes_per_sample*3   , _bytes_per_sample * 3);
+        memset(outbuf + _bytes_per_sample*7, 0, _bytes_per_sample);
+        outbuf  += _bytes_per_sample * out_channels;
+        inbuf   += _bytes_per_sample * in_channels;
+      }      
+    }
+
     /*int i,j;
     printf("_bytes_per_sample: %d GB_SIZE %d\n", _bytes_per_sample, GB_SIZE);
     for (i=0; i<GB_SIZE/_bytes_per_sample; i++){
@@ -410,7 +427,7 @@ void play_api_test(int samplerate, int bitdepth, int nchannels, int dest, uint32
     while((latency = audioplay_get_latency(st)) > (samplerate * (MIN_LATENCY_TIME + CTTW_SLEEP_TIME) / 1000))
       usleep(CTTW_SLEEP_TIME*1000);
 
-    ret = audioplay_play_buffer(st, buf, buffer_size);
+    ret = audioplay_play_buffer(st, buf, out_buffer_size);
     gbuf_st[bn]=IN_EN;
     pthread_mutex_unlock( &mutex[bn] );
     if (++bn == BN)
@@ -423,7 +440,7 @@ void play_api_test(int samplerate, int bitdepth, int nchannels, int dest, uint32
 
 void* in_thread(void)
 {
-    int bn=0, k;
+  int bn=0, k;
   while(1){
     int ret_n;
     pthread_mutex_lock( &mutex[bn] );
@@ -432,16 +449,16 @@ void* in_thread(void)
       usleep(SLEEPTIME);
       continue;
     }
-    ret_n=fread(gbuf[bn],_bytes_per_sample,BUFFER_SIZE_SAMPLES * 8, stdin);
-    if (ret_n < BUFFER_SIZE_SAMPLES*8){
+    ret_n=fread(gbuf[bn],_bytes_per_sample,BUFFER_SIZE_SAMPLES * _in_channels, stdin);
+    if (ret_n < BUFFER_SIZE_SAMPLES*_in_channels){
       int  j;
-      for (j=ret_n; j<BUFFER_SIZE_SAMPLES*8; j++){
+      for (j=ret_n; j<BUFFER_SIZE_SAMPLES*_in_channels; j++){
         for (k=0;k < _bytes_per_sample;k++)
           gbuf[bn][j+k]=0;
       }
       gbuf_st[bn]=OUT_EN;
       pthread_mutex_unlock( &mutex[bn] );
-      return;
+      return ;
     }
     gbuf_st[bn]=OUT_EN;
     pthread_mutex_unlock( &mutex[bn] );
@@ -459,7 +476,7 @@ void printhelp(void)
     "        rate in hz"
     "        bitdepht 16 24 32"
     "        mapping 01234567"
-    "Example: sox test.wav -t .s16 - | brutefir 3way.conf | hdmi_play2.bin 44100 24\n\n";
+    "Example: sox test.wav -t .s16 - | brutefir 3way.conf | hdmi_play2.bin 44100 24 01324567\n\n";
 
   printf("%s",s);
   return;
@@ -469,7 +486,8 @@ int main (int argc, char **argv)
 {
 
   int audio_dest = 1; // 0=headphones, 1=hdmi   
-  int channels = 8;
+  int out_channels = 8;
+  int in_channels = 6;
   int samplerate;
   int bitdepth ;
 
@@ -499,6 +517,7 @@ int main (int argc, char **argv)
   printf("channel_map: %08x\n", channel_map);
   //sleep (1); //if nessesary
 
+  _in_channels = in_channels;
   //in_thread
   pthread_t thread1;
   if(pthread_create(&thread1, NULL, (void *)in_thread, NULL) < 0){
@@ -509,7 +528,7 @@ int main (int argc, char **argv)
 
   // main loop
 
-  play_api_test(samplerate, bitdepth, channels, audio_dest, channel_map);
+  play_api_test(samplerate, bitdepth, in_channels, out_channels, audio_dest, channel_map);
 
 
   return 0;
