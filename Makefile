@@ -2,4 +2,4 @@ OBJS=hdmiplay.o
 BIN=hdmiplay.bin
 LDFLAGS+=-lilclient
 
-include ./Makefile.include
+include /opt/vc/src/hello_pi/Makefile.include

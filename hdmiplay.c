@@ -53,7 +53,7 @@ Modified by Amanogawa Audio Lab
 #define countof(arr) (sizeof(arr) / sizeof(arr[0]))
 #endif
 
-#define BUFFER_SIZE_SAMPLES 8192
+#define BUFFER_SIZE_SAMPLES 512
 #define BN 8
 #define OUT_EN 0
 #define IN_EN 1
